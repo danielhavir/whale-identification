@@ -1,0 +1,28 @@
+MODEL: "resnet18"
+OUT_DIM: 5
+DISTANCE: "euclidean"
+LOSS: "contrastive"
+# Applies to ContrastiveLoss only
+MARGIN: 2.0
+# Applies to MarginLoss only
+LOSS_LAMBDA: 0.5
+TRAIN_FILE: "train_1.csv"
+DATASET_CLASS: "pair"
+EXCLUDE_WHALE: True
+IMAGE_SIZE: 224
+TRANSFORMS: "CPad|RandomCrop"
+PAIR_SPLIT_P: 0.5
+BATCH_SIZE: 32
+TEST_BATCH_SIZE: 64
+EPOCHS: 50
+OPTIMIZER: "sgd"
+LR: 0.001
+MOMENTUM: 0.9
+WEIGHT_DECAY: 0.0001
+SCHEDULER: "warmup"
+GAMMA: 0.5
+ALPHA: 0.8
+REINDEX_INTERVAL: 5
+EVAL_INTERVAL: 5
+TEST_SIZE: 0.1
+SEED: 42

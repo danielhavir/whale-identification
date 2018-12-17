@@ -1,0 +1,15 @@
+# Add any directories, files, or patterns you don't want to be tracked by version control
+__pycache__/
+.ipynb_checkpoints/
+.idea/
+*.py[cod]
+*.log
+*.pkl
+
+logs/
+Pipfile.lock
+data/
+checkpoints/
+
+notebooks/
+dataset/

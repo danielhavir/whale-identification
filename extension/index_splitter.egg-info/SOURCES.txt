@@ -1,0 +1,6 @@
+index_splitter.cpp
+setup.py
+index_splitter.egg-info/PKG-INFO
+index_splitter.egg-info/SOURCES.txt
+index_splitter.egg-info/dependency_links.txt
+index_splitter.egg-info/top_level.txt
