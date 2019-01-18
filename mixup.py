@@ -14,8 +14,8 @@ class Mixup(object):
         perm_images = images[perm]
         perm_targets = targets[perm]
         lam = self.beta.sample((images.size(0),)).cuda()
-        images = lam.view(-1,1,1,1,1).expand(-1, 2, 1, 1, 1)*images + (self.one-lam).view(-1,1,1,1,1).expand(-1, 2, 1, 1, 1)*perm_images
-        targets = lam.unsqueeze(-1)*targets + (self.one-lam).unsqueeze(-1)*perm_targets
+        images = lam.view(-1,1,1,1,1).expand(-1,2,-1,-1,-1).mul(images) + (self.one-lam).view(-1,1,1,1,1).expand(-1,2,-1,-1,-1).mul(perm_images)
+        targets = targets.mul_(lam) + perm_targets.mul_(self.one-lam)
         return images, targets
 
 class BinaryCrossEntropy(nn.Module):

@@ -97,18 +97,10 @@ def get_loaders(dataset, config, logger, pair_loaders=False):
 		train_indices, test_indices = dataset.get_train_test_split()
 		phase_loader = namedtuple("PhaseLoader", ["batch", "single"])
 		loaders = {
-			"train": {
-				phase_loader(
-					batch=thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=fast_collate, num_workers=config.NW),
-					single=thd.DataLoader(dataset, batch_size=1, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=fast_collate, num_workers=config.NW)
-				)
-				},
-			"test": {
-				phase_loader(
-					batch=thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(test_indices), collate_fn=fast_collate, num_workers=config.NW),
-					single=thd.DataLoader(dataset, batch_size=1, sampler=thd.SubsetRandomSampler(test_indices), collate_fn=fast_collate, num_workers=config.NW)
-				)
-				}
+			"train": phase_loader(batch=thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=fast_collate, num_workers=config.NW),
+			single=thd.DataLoader(dataset, batch_size=1, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=fast_collate, num_workers=config.NW)),
+			"test": phase_loader(batch=thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(test_indices), collate_fn=fast_collate, num_workers=config.NW),
+			single=thd.DataLoader(dataset, batch_size=1, sampler=thd.SubsetRandomSampler(test_indices), collate_fn=fast_collate, num_workers=config.NW))
 		}
 	return loaders
 
@@ -220,43 +212,53 @@ def eval_loop(epoch, loaders, model, criterion, config, logger, phase=""):
 	batch_time = AverageMeter()
 	image_time = AverageMeter()
 	losses = AverageMeter()
-
 	model.eval()
 	pbar = tqdm(desc=f"{phase.upper()} EVAL Epoch {epoch+1}", total=len(loaders.single))
 	prefetcher = Prefetcher(loaders.single)
 	end_outer = time.time()
-	image_i = -1
-	predictions = torch.zeros(len(loaders.single), 5)
 	with torch.no_grad():
-		image_i += 1
+		image_i = -1
 		image, label = prefetcher.next_batch()
 		image = image.expand(config.EVAL_BATCH_SIZE, -1, -1, -1)
 
 		end = time.time()
 		image_distances = torch.zeros(len(loaders.batch), config.EVAL_BATCH_SIZE).cuda()
+		singles_targets = torch.zeros(len(loaders.single)).cuda().long()
+		predictions = torch.zeros(len(loaders.single), 5).cuda().long()
 		while image is not None:
+			image_i += 1
+			singles_targets[image_i].add_(label.long().item())
+
 			batch_prefetcher = Prefetcher(loaders.batch)
-			
+			batch_targets = torch.zeros(len(loaders.batch), config.EVAL_BATCH_SIZE).cuda().long()
 			inputs, targets = batch_prefetcher.next_batch()
+
 			batch_i = -1
 			image_distances.mul_(0)
 			while inputs is not None:
 				batch_i += 1
+
 				distances = model.predict(image, inputs)
-				if distances.size() < config.EVAL_BATCH_SIZE:
-					image_distances[batch_i][:distances.size()] += distances
+				if distances.size(0) < config.EVAL_BATCH_SIZE:
+					image_distances[batch_i][:distances.size(0)].add_(distances)
+					batch_targets[batch_i][:targets.size(0)].add_(targets.long())
 				else:
-					image_distances[batch_i] += distances
+					image_distances[batch_i].add_(distances)
+					batch_targets[batch_i].add_(targets.long())
 
 				torch.cuda.synchronize()
 				batch_time.update(time.time() - end)
 				end = time.time()
 				inputs, targets = batch_prefetcher.next_batch()
-			
-			image_distances, pred_indexes = image_distances.view(-1).topk(5, largest=False)
-			# TODO: Do something with pred_indexes to get label predictions
 
-			predictions[i] += label_predictions
+			image_distances = image_distances.view(-1)[:len(loaders.single)]
+			# TODO: Do something with pred_indexes to get label predictions
+			values, indices = image_distances.topk(5, largest=False)
+			
+			pred_targets = batch_targets.view(-1)[:len(loaders.batch.dataset)][indices]
+			if values.max() > criterion.margin:
+				pred_targets[4] = 0
+			predictions[image_i].add_(pred_targets)
 			image_time.update(time.time() - end_outer)
 			end_outer = time.time()
 			image, label = prefetcher.next_batch()
@@ -264,8 +266,10 @@ def eval_loop(epoch, loaders, model, criterion, config, logger, phase=""):
 			pbar.update(1)
 	
 	pbar.close()
+	accuracies = topk_accuracy_preds(predictions, singles_targets, topk=(1,3,5))
 
-	logger.info("%s EVAL Epoch: %d Loss: %.2f Batch Time: %.2fs Image Time: %.2fs" % (phase.upper(), epoch+1, losses.avg, batch_time.avg, image_time.avg))
+	logger.info("%s \tEVAL Epoch: %d Loss: %.2f Batch Time: %.2fs Image Time: %.2fs" % (phase.upper(), epoch+1, losses.avg, batch_time.avg, image_time.avg))
+	logger.info("\t\t\tTop-1: %.2f Top-3 %.2f Top-5 %.2f" % tuple(accuracies))
 
 def single_run(dataset, model, config, logger, run_num=0):
 	start = time.time()
@@ -277,10 +281,10 @@ def single_run(dataset, model, config, logger, run_num=0):
 		mixup = Mixup(config.ALPHA)
 	else:
 		mixup = None
-	
+
 	loaders = get_loaders(dataset, config, logger)
 	pair_dataset = PairExtension(dataset)
-	train_loader = get_loaders(pair_dataset)["train"]
+	train_loader = get_loaders(pair_dataset, config, logger, pair_loaders=True)["train"]
 	for epoch in range(config.EPOCHS):
 
 		if ((epoch+1) % config.REINDEX_INTERVAL) == 0:
@@ -312,7 +316,8 @@ def main(args):
 	config.CV = args.cross_validate
 	config.MIXUP = args.mixup
 	logger = setup_logger(args.no_snaps)
-	save_config(config)
+	if not args.no_snaps:
+		save_config(config)
 
 	logger.info(f"Setting seed {config.SEED}")
 	set_seed(config.SEED)

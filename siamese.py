@@ -6,9 +6,12 @@ class SiameseWrapper(nn.Module):
         self.model = model
         self.distance_fn = distance_fn
     
-    def predict(self, input1, input2):
-        output1 = self.model(input1)
-        output2 = self.model(input2)
+    def predict(self, image, batch):
+        if batch.size(0) < image.size(0):
+            image = image[:batch.size(0)]
+
+        output1 = self.model(image)
+        output2 = self.model(batch)
 
         if self.distance_fn is not None:
             output = self.distance_fn(output1, output2)
@@ -18,8 +21,8 @@ class SiameseWrapper(nn.Module):
         return output
 
     def forward(self, inputs):
-        output1 = self.model(inputs[0])
-        output2 = self.model(inputs[1])
+        output1 = self.model(inputs[:,0])
+        output2 = self.model(inputs[:,1])
 
         if self.distance_fn is not None:
             output = self.distance_fn(output1, output2)

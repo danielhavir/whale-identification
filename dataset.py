@@ -36,12 +36,12 @@ def pair_collate(batch):
 	targets = torch.tensor([target[2] for target in batch], dtype=torch.int64)
 	w = images1[0].size[0]
 	h = images1[0].size[1]
-	tensor = torch.zeros( (2, len(images1), 3, h, w), dtype=torch.uint8 )
+	tensor = torch.zeros( (len(images1), 2, 3, h, w), dtype=torch.uint8 )
 	for i, (img1, img2) in enumerate(zip(images1, images2)):
 		nump_array1 = np.asarray(img1, dtype=np.uint8).transpose(2, 0, 1)
 		nump_array2 = np.asarray(img2, dtype=np.uint8).transpose(2, 0, 1)
-		tensor[0,i] += torch.from_numpy(nump_array1)
-		tensor[1,i] += torch.from_numpy(nump_array2)
+		tensor[i,0] += torch.from_numpy(nump_array1)
+		tensor[i,1] += torch.from_numpy(nump_array2)
 	
 	return tensor, targets
 
@@ -78,6 +78,12 @@ class Dataset(torch.utils.data.Dataset):
 	def get_train_test_split(self):
 		return self.__train_idx, self.__test_idx
 	
+	def get_labels(self, train=True):
+		if train:
+			torch.from_numpy(self.df.Label.values[self.__train_idx])
+		else:
+			torch.from_numpy(self.df.Label.values[self.__test_idx])
+
 	def __len__(self):
 		return len(self.images)
 	
@@ -160,6 +166,7 @@ class Prefetcher(object):
 			self.next_inputs = self.next_inputs.cuda(non_blocking=True)
 			self.next_targets = self.next_targets.cuda(non_blocking=True)
 			self.next_inputs = self.next_inputs.float()
+			self.next_targets = self.next_targets.float()
 			self.next_inputs = self.next_inputs.sub_(self.mean).div_(self.std)
 			
 	def next_batch(self):
