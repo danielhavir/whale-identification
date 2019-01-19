@@ -172,7 +172,7 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 
 	model.train()
 	end = time.time()
-	scheduler = Scheduler(optimizer, len(loader), config.LR)
+	#scheduler = Scheduler(optimizer, len(loader), config.LR)
 	pbar = tqdm(desc=f"TRAIN Epoch {epoch+1}", total=len(loader))
 	prefetcher = Prefetcher(loader)
 
@@ -181,7 +181,7 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 	while inputs is not None:
 		i += 1
 
-		scheduler.adjust_lr(epoch, i)
+		#scheduler.adjust_lr(epoch, i)
 		data_time.update(time.time() - end)
 
 		if mixup is not None:
@@ -284,7 +284,7 @@ def eval_loop(epoch, loaders, model, criterion, config, logger):
 	# If any of the 5 smallest distances is greater than the criterion margin, replace prediction with new whale
 	pred_targets[:,-1].mul_((values.max(1)[0] < criterion.margin).long())
 	accuracies = topk_accuracy_preds(pred_targets, train_labels, topk=(1,3,5))
-	logger.info("TRAIN EVAL Epoch: %d Batch Time: %.2f s top-1: %.2f top-3 %.2f top-5 %.2f" % ((epoch+1, batch_time.avg) + tuple(accuracies)))
+	logger.info("TRAIN EVAL Epoch: %d Batch Time: %.2fs Top-1: %.2f Top-3 %.2f Top-5 %.2f" % ((epoch+1, batch_time.avg) + tuple(accuracies)))
 
 	# test_distance_matrix -> num_test_images x num_images
 	test_distance_matrix = distance_matrix[num_images:,:num_images]
@@ -313,14 +313,14 @@ def single_run(dataset, model, config, logger, run_num=0):
 	train_loader = get_loaders(pair_dataset, config, logger, pair_loaders=True)["train"]
 	for epoch in range(config.EPOCHS):
 
-		if ((epoch+1) % config.REINDEX_INTERVAL) == 0:
-			logger.info(f"Reindexing dataset at epoch {epoch+1}")
-			train_loader = get_loaders(pair_dataset)["train"]
-
 		train_loop(epoch, train_loader, model, criterion, optimizer, config, logger, mixup=mixup)
 
 		if (epoch+1) % config.EVAL_INTERVAL == 0:
 			eval_loop(epoch, loaders, model, criterion, config, logger)
+
+		if ((epoch+1) % config.REINDEX_INTERVAL) == 0 and (epoch+1) < config.EPOCHS:
+			logger.info(f"Reindexing dataset at epoch {epoch+1}")
+			train_loader = get_loaders(pair_dataset, config, logger, pair_loaders=True)["train"]
 	
 	end = time.time() - start
 	logger.info("Run %d finished at %dmin %.2fs" % (run_num, end // 60, end % 60))
