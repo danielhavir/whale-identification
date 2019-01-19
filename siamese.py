@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 class SiameseWrapper(nn.Module):
@@ -30,3 +31,10 @@ class SiameseWrapper(nn.Module):
             output = (output1, output2)
         
         return output
+
+def similarity_matrix(mat):
+    r = torch.mm(mat, mat.t())
+    diag = r.diag().unsqueeze(0)
+    diag = diag.expand_as(r)
+    D = diag + diag.t() - 2*r
+    return D.sqrt()

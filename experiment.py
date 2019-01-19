@@ -19,11 +19,11 @@ from dataset import Dataset, PairExtension, fast_collate, pair_collate, Prefetch
 from ctransforms import ConditionalPad
 from resnet import resnet18, resnet34, resnet50, resnet101, resnet152
 from densenet import densenet121, densenet169, densenet201, densenet161
-from siamese import SiameseWrapper
+from siamese import SiameseWrapper, similarity_matrix
 from loss import ContrastiveLoss, MarginLoss
 from schedulers import Scheduler
 from mixup import Mixup
-from metrics import AverageMeter, topk_accuracy
+from metrics import AverageMeter, topk_accuracy, topk_accuracy_preds
 
 def load_config(path):
 	with open(path, "r") as f:
@@ -95,12 +95,10 @@ def get_loaders(dataset, config, logger, pair_loaders=False):
 		}
 	else:
 		train_indices, test_indices = dataset.get_train_test_split()
-		phase_loader = namedtuple("PhaseLoader", ["batch", "single"])
+		#phase_loader = namedtuple("PhaseLoader", ["batch", "single"])
 		loaders = {
-			"train": phase_loader(batch=thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=fast_collate, num_workers=config.NW),
-			single=thd.DataLoader(dataset, batch_size=1, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=fast_collate, num_workers=config.NW)),
-			"test": phase_loader(batch=thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(test_indices), collate_fn=fast_collate, num_workers=config.NW),
-			single=thd.DataLoader(dataset, batch_size=1, sampler=thd.SubsetRandomSampler(test_indices), collate_fn=fast_collate, num_workers=config.NW))
+			"train": thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=fast_collate, num_workers=config.NW),
+			"test": thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(test_indices), collate_fn=fast_collate, num_workers=config.NW)
 		}
 	return loaders
 
@@ -208,68 +206,96 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 
 	logger.info("TRAIN Epoch: %d Loss: %.2f Batch Time: %.2fs Data Time: %.2fs" % (epoch+1, losses.avg, batch_time.avg, data_time.avg))
 
-def eval_loop(epoch, loaders, model, criterion, config, logger, phase=""):
+def eval_loop(epoch, loaders, model, criterion, config, logger):
 	batch_time = AverageMeter()
-	image_time = AverageMeter()
-	losses = AverageMeter()
+	total_images = len(loaders["train"].dataset)
+	num_images = loaders["train"].sampler.indices.size(0)
+	num_test_images = loaders["test"].sampler.indices.size(0)
 	model.eval()
-	pbar = tqdm(desc=f"{phase.upper()} EVAL Epoch {epoch+1}", total=len(loaders.single))
-	prefetcher = Prefetcher(loaders.single)
-	end_outer = time.time()
+	pbar = tqdm(desc=f"TRAIN EVAL Epoch {epoch+1}", total=len(loaders["train"]))
+	prefetcher = Prefetcher(loaders["train"])
 	with torch.no_grad():
-		image_i = -1
-		image, label = prefetcher.next_batch()
-		image = image.expand(config.EVAL_BATCH_SIZE, -1, -1, -1)
+		batch_i = -1
+		inputs, targets = prefetcher.next_batch()
 
 		end = time.time()
-		image_distances = torch.zeros(len(loaders.batch), config.EVAL_BATCH_SIZE).cuda()
-		singles_targets = torch.zeros(len(loaders.single)).cuda().long()
-		predictions = torch.zeros(len(loaders.single), 5).cuda().long()
-		while image is not None:
-			image_i += 1
-			singles_targets[image_i].add_(label.long().item())
+		train_labels = torch.zeros(len(loaders["train"]), config.EVAL_BATCH_SIZE).cuda().long()
+		# First num_images are train predictions, the rest (num_test_images) are test predictions
+		predictions = torch.zeros(len(loaders["train"])+len(loaders["test"]), config.EVAL_BATCH_SIZE, config.OUT_DIM).cuda()
+		while inputs is not None:
+			batch_i += 1
+			preds = model.model(inputs)
+			if preds.size(0) < config.EVAL_BATCH_SIZE:
+				predictions[batch_i][:preds.size(0)].add_(preds)
+				train_labels[batch_i][:targets.size(0)].add_(targets.long())
+			else:
+				predictions[batch_i].add_(preds)
+				train_labels[batch_i].add_(targets.long())
 
-			batch_prefetcher = Prefetcher(loaders.batch)
-			batch_targets = torch.zeros(len(loaders.batch), config.EVAL_BATCH_SIZE).cuda().long()
-			inputs, targets = batch_prefetcher.next_batch()
-
-			batch_i = -1
-			image_distances.mul_(0)
-			while inputs is not None:
-				batch_i += 1
-
-				distances = model.predict(image, inputs)
-				if distances.size(0) < config.EVAL_BATCH_SIZE:
-					image_distances[batch_i][:distances.size(0)].add_(distances)
-					batch_targets[batch_i][:targets.size(0)].add_(targets.long())
-				else:
-					image_distances[batch_i].add_(distances)
-					batch_targets[batch_i].add_(targets.long())
-
-				torch.cuda.synchronize()
-				batch_time.update(time.time() - end)
-				end = time.time()
-				inputs, targets = batch_prefetcher.next_batch()
-
-			image_distances = image_distances.view(-1)[:len(loaders.single)]
-			# TODO: Do something with pred_indexes to get label predictions
-			values, indices = image_distances.topk(5, largest=False)
-			
-			pred_targets = batch_targets.view(-1)[:len(loaders.batch.dataset)][indices]
-			if values.max() > criterion.margin:
-				pred_targets[4] = 0
-			predictions[image_i].add_(pred_targets)
-			image_time.update(time.time() - end_outer)
-			end_outer = time.time()
-			image, label = prefetcher.next_batch()
+			torch.cuda.synchronize()
+			batch_time.update(time.time() - end)
+			end = time.time()
+			inputs, targets = prefetcher.next_batch()
 			pbar.set_postfix()
 			pbar.update(1)
 	
-	pbar.close()
-	accuracies = topk_accuracy_preds(predictions, singles_targets, topk=(1,3,5))
+		pbar.close()
+		pbar = tqdm(desc=f"TEST EVAL Epoch {epoch+1}", total=len(loaders["test"]))
+		prefetcher = Prefetcher(loaders["test"])
+		inputs, targets = prefetcher.next_batch()
 
-	logger.info("%s \tEVAL Epoch: %d Loss: %.2f Batch Time: %.2fs Image Time: %.2fs" % (phase.upper(), epoch+1, losses.avg, batch_time.avg, image_time.avg))
-	logger.info("\t\t\tTop-1: %.2f Top-3 %.2f Top-5 %.2f" % tuple(accuracies))
+		end = time.time()
+		test_labels = torch.zeros(len(loaders["test"]), config.EVAL_BATCH_SIZE).cuda().long()
+		test_i = -1
+		while inputs is not None:
+			batch_i += 1
+			test_i += 1
+			preds = model.model(inputs)
+			if preds.size(0) < config.EVAL_BATCH_SIZE:
+				predictions[batch_i][:preds.size(0)].add_(preds)
+				test_labels[test_i][:targets.size(0)].add_(targets.long())
+			else:
+				predictions[batch_i].add_(preds)
+				test_labels[test_i].add_(targets.long())
+
+			torch.cuda.synchronize()
+			batch_time.update(time.time() - end)
+			end = time.time()
+			inputs, targets = prefetcher.next_batch()
+			pbar.set_postfix()
+			pbar.update(1)
+	pbar.close()
+
+	train_predictions = predictions[:len(loaders["train"])].view(-1, config.OUT_DIM)[:num_images]
+	test_predictions = predictions[:len(loaders["test"])].view(-1, config.OUT_DIM)[:num_test_images]
+	predictions = torch.zeros(total_images, config.OUT_DIM).cuda()
+	predictions[:num_images].add_(train_predictions)
+	predictions[num_images:].add_(test_predictions)
+
+	train_labels = train_labels.view(-1)[:num_images]
+	test_labels = test_labels.view(-1)[:num_test_images]
+	distance_matrix = similarity_matrix(predictions)
+	train_distance_matrix = distance_matrix[:num_images,:num_images]
+	values, indices = train_distance_matrix.topk(6, 1, largest=False)
+	# First column is the identity (diagonal on similarity matrix) -> remove
+	values = values[:,1:]
+	indices = indices[:,1:]
+	pred_targets = train_labels[indices]
+	# If any of the 5 smallest distances is greater than the criterion margin, replace prediction with new whale
+	pred_targets[:,-1].mul_((values.max(1)[0] < criterion.margin).long())
+	accuracies = topk_accuracy_preds(pred_targets, train_labels, topk=(1,3,5))
+	logger.info("TRAIN EVAL Epoch: %d Batch Time: %.2f s top-1: %.2f top-3 %.2f top-5 %.2f" % ((epoch+1, batch_time.avg) + tuple(accuracies)))
+
+	# test_distance_matrix -> num_test_images x num_images
+	test_distance_matrix = distance_matrix[num_images:,:num_images]
+	
+	values, indices = test_distance_matrix.topk(5, 1, largest=False)
+	pred_targets = train_labels[indices]
+	# If any of the 5 smallest distances is greater than the criterion margin, replace prediction with new whale
+	pred_targets[:,-1].mul_((values.max(1)[0] < criterion.margin).long())
+	accuracies = topk_accuracy_preds(pred_targets, test_labels, topk=(1,3,5))
+
+	logger.info("TEST EVAL Epoch: %d Batch Time: %.2fs Top-1: %.2f Top-3 %.2f Top-5 %.2f" % ((epoch+1, batch_time.avg) + tuple(accuracies)))
 
 def single_run(dataset, model, config, logger, run_num=0):
 	start = time.time()
@@ -294,8 +320,7 @@ def single_run(dataset, model, config, logger, run_num=0):
 		train_loop(epoch, train_loader, model, criterion, optimizer, config, logger, mixup=mixup)
 
 		if (epoch+1) % config.EVAL_INTERVAL == 0:
-			for phase in ["train", "test"]:
-				eval_loop(epoch, loaders[phase], model, criterion, config, logger, phase=phase)
+			eval_loop(epoch, loaders, model, criterion, config, logger)
 	
 	end = time.time() - start
 	logger.info("Run %d finished at %dmin %.2fs" % (run_num, end // 60, end % 60))
