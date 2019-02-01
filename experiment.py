@@ -15,12 +15,12 @@ import torch.utils.data as thd
 import torchvision.transforms as transforms
 from tqdm import tqdm
 
-from dataset import Dataset, PairExtension, fast_collate, pair_collate, Prefetcher
+from dataset import Dataset, PairExtension, TripletExtension, fast_collate, pair_collate, triple_collate, Prefetcher, TripletPrefetcher
 from ctransforms import ConditionalPad
 from resnet import resnet18, resnet34, resnet50, resnet101, resnet152
 from densenet import densenet121, densenet169, densenet201, densenet161
-from siamese import SiameseWrapper, similarity_matrix
-from loss import ContrastiveLoss, MarginLoss
+from siamese import SiameseWrapper, TripletWrapper, similarity_matrix
+from loss import ContrastiveLoss, TripletLoss, MarginLoss
 from schedulers import Scheduler
 from mixup import Mixup
 from metrics import AverageMeter, topk_accuracy, topk_accuracy_preds
@@ -85,17 +85,21 @@ def get_dataset(config, logger):
 
 	return dataset
 
-def get_loaders(dataset, config, logger, pair_loaders=False):
-	if pair_loaders:
+def get_loaders(dataset, config, logger, n=1):
+	if n == 2:
 		t0 = time.time()
 		train_indices = dataset.get_train_indices(p=config.PAIR_SPLIT_P)
 		logger.info("Indices created at %.2fs" % (time.time() - t0))
 		loaders = {
-			"train": thd.DataLoader(dataset, batch_size=config.BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=pair_collate, num_workers=config.NW),
+			"train": thd.DataLoader(PairExtension(dataset), batch_size=config.BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=pair_collate, num_workers=config.NW),
+		}
+	elif n == 3:
+		train_indices, test_indices = dataset.get_train_test_split()
+		loaders = {
+			"train": thd.DataLoader(TripletExtension(dataset), batch_size=config.BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=triple_collate, num_workers=config.NW),
 		}
 	else:
 		train_indices, test_indices = dataset.get_train_test_split()
-		#phase_loader = namedtuple("PhaseLoader", ["batch", "single"])
 		loaders = {
 			"train": thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=fast_collate, num_workers=config.NW),
 			"test": thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(test_indices), collate_fn=fast_collate, num_workers=config.NW)
@@ -128,7 +132,13 @@ def load_model(config, logger):
 		model.avgpool = torch.nn.AdaptiveAvgPool2d(1)
 		model.fc = classifier(num_ftrs)
 	
-	model = SiameseWrapper(model, distance_fn=F.pairwise_distance)
+	if config.DATASET_N == 2:
+		model = SiameseWrapper(model, distance_fn=F.pairwise_distance)
+	elif config.DATASET_N == 3:
+		model = TripletWrapper(model)
+	else:
+		raise ValueError(f"Received unknown dataset n: {config.DATASET_N}")
+	
 	if config.MULTI_GPU:
 		logger.info("Using multiple GPUs")
 		model = nn.DataParallel(model)
@@ -141,6 +151,8 @@ def load_criterion(config, logger):
 	logger.info(f"Using {config.LOSS} loss function")
 	if config.LOSS == "contrastive":
 		criterion = ContrastiveLoss(margin=config.MARGIN)
+	elif config.LOSS == "triplet":
+		criterion = TripletLoss(margin=config.MARGIN)
 	elif config.LOSS == "margin":
 		criterion = MarginLoss(loss_lambda=config.LOSS_LAMBDA)
 	else:
@@ -174,9 +186,9 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 	end = time.time()
 	#scheduler = Scheduler(optimizer, len(loader), config.LR)
 	pbar = tqdm(desc=f"TRAIN Epoch {epoch+1}", total=len(loader))
-	prefetcher = Prefetcher(loader)
+	prefetcher = TripletPrefetcher(loader)
 
-	inputs, targets = prefetcher.next_batch()
+	inputs = prefetcher.next_batch()
 	i = -1
 	while inputs is not None:
 		i += 1
@@ -185,9 +197,9 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 		data_time.update(time.time() - end)
 
 		if mixup is not None:
-			inputs, targets = mixup(inputs, targets)
-		outputs = model(inputs)
-		loss = criterion(outputs, targets)
+			inputs = mixup(inputs)
+		anchor, positive, negative = model(inputs)
+		loss = criterion(anchor, positive, negative)
 
 		optimizer.zero_grad()
 		loss.backward()
@@ -200,7 +212,7 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 		pbar.set_postfix(loss=losses.avg)
 		pbar.update(1)
 		end = time.time()
-		inputs, targets = prefetcher.next_batch()
+		inputs = prefetcher.next_batch()
 	
 	pbar.close()
 
@@ -309,8 +321,7 @@ def single_run(dataset, model, config, logger, run_num=0):
 		mixup = None
 
 	loaders = get_loaders(dataset, config, logger)
-	pair_dataset = PairExtension(dataset)
-	train_loader = get_loaders(pair_dataset, config, logger, pair_loaders=True)["train"]
+	train_loader = get_loaders(dataset, config, logger, n=config.DATASET_N)["train"]
 	for epoch in range(config.EPOCHS):
 
 		train_loop(epoch, train_loader, model, criterion, optimizer, config, logger, mixup=mixup)
@@ -318,9 +329,9 @@ def single_run(dataset, model, config, logger, run_num=0):
 		if (epoch+1) % config.EVAL_INTERVAL == 0:
 			eval_loop(epoch, loaders, model, criterion, config, logger)
 
-		if ((epoch+1) % config.REINDEX_INTERVAL) == 0 and (epoch+1) < config.EPOCHS:
+		if config.DATASET_N == 2 and ((epoch+1) % config.REINDEX_INTERVAL) == 0 and (epoch+1) < config.EPOCHS:
 			logger.info(f"Reindexing dataset at epoch {epoch+1}")
-			train_loader = get_loaders(pair_dataset, config, logger, pair_loaders=True)["train"]
+			train_loader = get_loaders(dataset, config, logger, n=config.DATASET_N)["train"]
 	
 	end = time.time() - start
 	logger.info("Run %d finished at %dmin %.2fs" % (run_num, end // 60, end % 60))

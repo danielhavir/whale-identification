@@ -2,6 +2,7 @@ import os
 import multiprocessing as mp
 from threading import Thread
 from itertools import chain
+from collections import defaultdict
 import random
 
 import torch
@@ -45,6 +46,24 @@ def pair_collate(batch):
 	
 	return tensor, targets
 
+def triple_collate(batch):
+	""" fast_collate for pairs """
+	images1 = [img[0] for img in batch]
+	images2 = [img[1] for img in batch]
+	images3 = [img[2] for img in batch]
+	w = images1[0].size[0]
+	h = images1[0].size[1]
+	tensor = torch.zeros( (len(images1), 3, 3, h, w), dtype=torch.uint8 )
+	for i, (img1, img2, img3) in enumerate(zip(images1, images2, images3)):
+		nump_array1 = np.asarray(img1, dtype=np.uint8).transpose(2, 0, 1)
+		nump_array2 = np.asarray(img2, dtype=np.uint8).transpose(2, 0, 1)
+		nump_array3 = np.asarray(img3, dtype=np.uint8).transpose(2, 0, 1)
+		tensor[i,0] += torch.from_numpy(nump_array1)
+		tensor[i,1] += torch.from_numpy(nump_array2)
+		tensor[i,2] += torch.from_numpy(nump_array3)
+	
+	return tensor
+
 class Dataset(torch.utils.data.Dataset):
 	""" Wrapper for image data to store in memory """
 	def __init__(self, csv_filename="train_1.csv", num_workers=10, test_size=0.1, seed=42, filter_new_whale=True,
@@ -80,9 +99,9 @@ class Dataset(torch.utils.data.Dataset):
 	
 	def get_labels(self, train=True):
 		if train:
-			torch.from_numpy(self.df.Label.values[self.__train_idx])
+			return torch.from_numpy(self.df.Label.values[self.__train_idx])
 		else:
-			torch.from_numpy(self.df.Label.values[self.__test_idx])
+			return torch.from_numpy(self.df.Label.values[self.__test_idx])
 
 	def __len__(self):
 		return len(self.images)
@@ -146,6 +165,51 @@ class PairExtension(torch.utils.data.Dataset):
 			label = int(self.dataset.df.Label[idx1] != self.dataset.df.Label[idx2])
 		return image1, image2, label, idxs
 
+class TripletExtension(torch.utils.data.Dataset):
+	def __init__(self, dataset, transform=None):
+		self.dataset = dataset
+		labels = self.dataset.get_labels()
+		self.labels_dict = defaultdict(list)
+		for i, label in enumerate(labels):
+			self.labels_dict[label.item()].append(i)
+		
+		self.labels = labels.unique(sorted=False)
+		self.num_classes = len(self.labels)
+		
+		if transform is None:
+			self.transform = self.dataset.transform
+		else:
+			self.transform = transform
+
+	def __len__(self):
+		return len(self.dataset)
+
+	def __getitem__(self, idx):
+		image = self.dataset.images[idx]
+		label = self.dataset.df.Label[idx]
+
+		if not self.dataset.filter_new_whale and label == 0:
+			pos_idx = self.labels_dict[label][random.randint(0, len(self.labels_dict[label])-1)]
+			while (pos_idx == idx and len(self.labels_dict[label]) > 1):
+				pos_idx = self.labels_dict[label][random.randint(0, len(self.labels_dict[label])-1)]
+		else:
+			pos_idx = idx
+		
+		neg_label = self.labels[random.randint(0, self.num_classes-1)].item()
+		while neg_label == label:
+			neg_label = self.labels[random.randint(0, self.num_classes-1)].item()
+		neg_idx = self.labels_dict[neg_label][random.randint(0, len(self.labels_dict[neg_label])-1)]
+
+		pos_image = self.dataset.images[pos_idx]
+		neg_image = self.dataset.images[neg_idx]
+
+		if self.transform is not None:
+			image = self.transform(image)
+			pos_image = self.transform(pos_image)
+			neg_image = self.transform(neg_image)
+		
+		return image, pos_image, neg_image
+
 class Prefetcher(object):
 	""" Prefetcher returns a preloaded batch and starts copying next batch to GPU. """
 	def __init__(self, loader):
@@ -175,3 +239,29 @@ class Prefetcher(object):
 		targets = self.next_targets
 		self.preload()
 		return inputs, targets
+
+class TripletPrefetcher(object):
+	""" Prefetcher returns a preloaded batch and starts copying next batch to GPU. """
+	def __init__(self, loader):
+		self.loader = iter(loader)
+		self.mean = torch.tensor([0.485 * 255, 0.456 * 255, 0.406 * 255]).cuda().view(1,1,3,1,1)
+		self.std = torch.tensor([0.229 * 255, 0.224 * 255, 0.225 * 255]).cuda().view(1,1,3,1,1)
+		self.stream = torch.cuda.Stream()
+		self.preload()
+
+	def preload(self):
+		try:
+			self.next_inputs = next(self.loader)
+		except StopIteration:
+			self.next_inputs = None
+			return
+		with torch.cuda.stream(self.stream):
+			self.next_inputs = self.next_inputs.cuda(non_blocking=True)
+			self.next_inputs = self.next_inputs.float()
+			self.next_inputs = self.next_inputs.sub_(self.mean).div_(self.std)
+			
+	def next_batch(self):
+		torch.cuda.current_stream().wait_stream(self.stream)
+		inputs = self.next_inputs
+		self.preload()
+		return inputs

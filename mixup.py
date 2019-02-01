@@ -9,14 +9,17 @@ class Mixup(object):
         self.beta = torch.distributions.Beta(alpha2, alpha1)
         self.one = torch.tensor(1.).cuda()
     
-    def __call__(self, images, targets):
+    def __call__(self, images, targets=None):
         perm = torch.randperm(images.size(0))
         perm_images = images[perm]
-        perm_targets = targets[perm]
         lam = self.beta.sample((images.size(0),)).cuda()
-        images = lam.view(-1,1,1,1,1).expand(-1,2,-1,-1,-1).mul(images) + (self.one-lam).view(-1,1,1,1,1).expand(-1,2,-1,-1,-1).mul(perm_images)
-        targets = targets.mul_(lam) + perm_targets.mul_(self.one-lam)
-        return images, targets
+        images = lam.view(-1,1,1,1,1).expand(-1,3,-1,-1,-1).mul(images) + (self.one-lam).view(-1,1,1,1,1).expand(-1,3,-1,-1,-1).mul(perm_images)
+        if targets is not None:
+            perm_targets = targets[perm]
+            targets = targets.mul_(lam) + perm_targets.mul_(self.one-lam)
+            return images, targets
+        else:
+            return images
 
 class BinaryCrossEntropy(nn.Module):
     def __init__(self, device: torch.device, weight=torch.tensor([1., 1.]), size_average=True):

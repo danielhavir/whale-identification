@@ -6,20 +6,6 @@ class SiameseWrapper(nn.Module):
         super(SiameseWrapper, self).__init__()
         self.model = model
         self.distance_fn = distance_fn
-    
-    def predict(self, image, batch):
-        if batch.size(0) < image.size(0):
-            image = image[:batch.size(0)]
-
-        output1 = self.model(image)
-        output2 = self.model(batch)
-
-        if self.distance_fn is not None:
-            output = self.distance_fn(output1, output2)
-        else:
-            output = (output1, output2)
-        
-        return output
 
     def forward(self, inputs):
         output1 = self.model(inputs[:,0])
@@ -31,6 +17,18 @@ class SiameseWrapper(nn.Module):
             output = (output1, output2)
         
         return output
+
+class TripletWrapper(nn.Module):
+    def __init__(self, model, distance_fn=None):
+        super(TripletWrapper, self).__init__()
+        self.model = model
+
+    def forward(self, inputs):
+        anchor = self.model(inputs[:,0])
+        positive = self.model(inputs[:,1])
+        negative = self.model(inputs[:,2])
+
+        return anchor, positive, negative
 
 def similarity_matrix(mat):
     r = torch.mm(mat, mat.t())

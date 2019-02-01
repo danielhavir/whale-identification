@@ -1,11 +1,12 @@
 MODEL: "resnet18"
 OUT_DIM: 5
 DISTANCE: "euclidean"
-LOSS: "contrastive"
+LOSS: "triplet"
 # Applies to ContrastiveLoss only
 MARGIN: 2.0
 TRAIN_FILE: "train_1.csv"
-DATASET_CLASS: "pair"
+# 2 for Pair, 3 for Triplet
+DATASET_N: 3
 EXCLUDE_WHALE: True
 IMAGE_SIZE: 224
 TRANSFORMS: "CPad|RandomCrop"
