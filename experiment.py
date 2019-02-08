@@ -16,7 +16,7 @@ import torchvision.transforms as transforms
 from tqdm import tqdm
 
 from dataset import Dataset, PairExtension, TripletExtension, fast_collate, pair_collate, triple_collate, Prefetcher, TripletPrefetcher
-from ctransforms import ConditionalPad
+import ctransforms
 from resnet import resnet18, resnet34, resnet50, resnet101, resnet152
 from densenet import densenet121, densenet169, densenet201, densenet161
 from siamese import SiameseWrapper, TripletWrapper, similarity_matrix
@@ -67,12 +67,24 @@ def set_seed(seed):
 	torch.manual_seed(seed)
 
 def get_transforms(config):
-	transform = [transforms.ToPILImage()]
+	transform = []
+	if not config.INCLUDE_BOXES:
+		transform.append(transforms.ToPILImage())
 	for t in config.TRANSFORMS.split("|"):
 		if t == "CPad":
-			transform.append(ConditionalPad(config.IMAGE_SIZE))
+			transform.append(ctransforms.ConditionalPad(config.IMAGE_SIZE))
+		elif t == "Square":
+			transform.append(ctransforms.Square(config.IMAGE_SIZE))
+		elif t == "Resize":
+			if config.INCLUDE_BOXES:
+				transform.append(ctransforms.Resize(config.IMAGE_SIZE+1))
+			else:
+				transform.append(transforms.Resize(config.IMAGE_SIZE+1))
 		elif t == "RandomCrop":
-			transform.append(transforms.RandomCrop(config.IMAGE_SIZE))
+			if config.INCLUDE_BOXES:
+				transform.append(ctransforms.RandomCrop(config.IMAGE_SIZE))
+			else:
+				transform.append(transforms.RandomCrop(config.IMAGE_SIZE))
 	return transforms.Compose(transform)
 
 def get_dataset(config, logger):

@@ -17,7 +17,7 @@ def cv_loader(path):
 	img = cv2.imread(path)[:,:,::-1]
 	return img
 
-def fast_collate(batch):
+def fast_collate_pil(batch):
 	""" Collate function for DataLoader replace slow transforms.ToTensor """
 	images = [img[0] for img in batch]
 	targets = torch.tensor([target[1] for target in batch], dtype=torch.int64)
@@ -27,6 +27,18 @@ def fast_collate(batch):
 	for i, img in enumerate(images):
 		nump_array = np.asarray(img, dtype=np.uint8).transpose(2, 0, 1)
 		tensor[i] += torch.from_numpy(nump_array)
+	
+	return tensor, targets
+
+def fast_collate(batch):
+	""" Collate function for DataLoader replace slow transforms.ToTensor """
+	images = [img[0] for img in batch]
+	targets = torch.tensor([target[1] for target in batch], dtype=torch.int64)
+	w = images[0].shape[1]
+	h = images[0].shape[0]
+	tensor = torch.zeros( (len(images), 3, h, w), dtype=torch.uint8 )
+	for i, img in enumerate(images):
+		tensor[i] += torch.from_numpy(img.transpose(2, 0, 1))
 	
 	return tensor, targets
 
@@ -46,7 +58,7 @@ def pair_collate(batch):
 	
 	return tensor, targets
 
-def triple_collate(batch):
+def triple_collate_pil(batch):
 	""" fast_collate for pairs """
 	images1 = [img[0] for img in batch]
 	images2 = [img[1] for img in batch]
@@ -64,15 +76,34 @@ def triple_collate(batch):
 	
 	return tensor
 
+def triple_collate(batch):
+	""" fast_collate for pairs """
+	images1 = [img[0] for img in batch]
+	images2 = [img[1] for img in batch]
+	images3 = [img[2] for img in batch]
+	w = images1[0].shape[1]
+	h = images1[0].shape[0]
+	tensor = torch.zeros( (len(images1), 3, 3, h, w), dtype=torch.uint8 )
+	for i, (img1, img2, img3) in enumerate(zip(images1, images2, images3)):
+		tensor[i,0] += torch.from_numpy(img1.transpose(2, 0, 1))
+		tensor[i,1] += torch.from_numpy(img2.transpose(2, 0, 1))
+		tensor[i,2] += torch.from_numpy(img3.transpose(2, 0, 1))
+	
+	return tensor
+
 class Dataset(torch.utils.data.Dataset):
 	""" Wrapper for image data to store in memory """
 	def __init__(self, csv_filename="train_1.csv", num_workers=10, test_size=0.1, seed=42, filter_new_whale=True,
-	transform=None, print_fn=print):
+	transform=None, include_boxes=True, print_fn=print):
 		self.df = pd.read_csv(os.path.join(os.environ["data"], "humpback-whale-identification", csv_filename))
 		self.transform = transform
 		self.filter_new_whale = filter_new_whale
 		if filter_new_whale:
 			self.df = self.df[self.df.Id!="new_whale"].reset_index(drop=True)
+		
+		self.include_boxes = include_boxes
+		if self.include_boxes:
+			self.boxes = pd.read_csv(os.path.join(os.environ["data"], "humpback-whale-identification", "bounding_boxes.csv"), index_col="Image")
 
 		categories = self.df.Id.unique()
 		categories.sort()
@@ -108,11 +139,21 @@ class Dataset(torch.utils.data.Dataset):
 	
 	def __getitem__(self, idx):
 		image = self.images[idx]
+		if self.include_boxes:
+			box = self.boxes.loc[self.df.Image[idx]].values.copy()
 
 		if self.transform is not None:
-			image = self.transform(image)
+			if self.include_boxes:
+				s = self.transform({"image": image, "bb": box})
+				image = s["image"]
+				box = s["bb"]
+			else:
+				image = self.transform(image)
 		
-		return image, self.df.Label[idx], idx
+		if self.include_boxes:
+			return image, self.df.Label[idx], box, idx
+		else:
+			return image, self.df.Label[idx], idx
 
 class PairExtension(torch.utils.data.Dataset):
 	""" Extension of Dataset when training on pairs """
@@ -166,49 +207,51 @@ class PairExtension(torch.utils.data.Dataset):
 		return image1, image2, label, idxs
 
 class TripletExtension(torch.utils.data.Dataset):
-	def __init__(self, dataset, transform=None):
+	def __init__(self, dataset):
 		self.dataset = dataset
+		indices = self.dataset.get_train_test_split()[0]
 		labels = self.dataset.get_labels()
 		self.labels_dict = defaultdict(list)
-		for i, label in enumerate(labels):
+		for i, label in zip(indices, labels):
 			self.labels_dict[label.item()].append(i)
 		
 		self.labels = labels.unique(sorted=False)
 		self.num_classes = len(self.labels)
-		
-		if transform is None:
-			self.transform = self.dataset.transform
-		else:
-			self.transform = transform
 
 	def __len__(self):
 		return len(self.dataset)
 
 	def __getitem__(self, idx):
-		image = self.dataset.images[idx]
-		label = self.dataset.df.Label[idx]
+		if self.dataset.include_boxes:
+			image, label, box, ix = self.dataset[idx]
+		else:
+			image, label, ix = self.dataset[idx]
+		assert idx == ix
 
 		if not self.dataset.filter_new_whale and label == 0:
+			pos_idx = idx
+		else:
 			pos_idx = self.labels_dict[label][random.randint(0, len(self.labels_dict[label])-1)]
 			while (pos_idx == idx and len(self.labels_dict[label]) > 1):
 				pos_idx = self.labels_dict[label][random.randint(0, len(self.labels_dict[label])-1)]
-		else:
-			pos_idx = idx
 		
 		neg_label = self.labels[random.randint(0, self.num_classes-1)].item()
 		while neg_label == label:
 			neg_label = self.labels[random.randint(0, self.num_classes-1)].item()
 		neg_idx = self.labels_dict[neg_label][random.randint(0, len(self.labels_dict[neg_label])-1)]
 
-		pos_image = self.dataset.images[pos_idx]
-		neg_image = self.dataset.images[neg_idx]
-
-		if self.transform is not None:
-			image = self.transform(image)
-			pos_image = self.transform(pos_image)
-			neg_image = self.transform(neg_image)
+		if self.dataset.include_boxes:
+			pos_image, l, pos_box, ix = self.dataset[pos_idx]
+			assert l==label and ix == pos_idx, print("Indices: {}, {}, {} Labels {} {}".format(idx, ix, pos_idx, l, label))
+			neg_image, l, neg_box, ix = self.dataset[neg_idx]
+			assert l==neg_label and ix == neg_idx, print("Indices: {}, {}, {} Labels {} {}".format(idx, ix, neg_idx, l, neg_label))
+		else:
+			pos_image, l, _ = self.dataset[pos_idx]
+			assert l==label
+			neg_image, l, _ = self.dataset[neg_idx]
+			assert l==neg_label
 		
-		return image, pos_image, neg_image
+		return image, pos_image, neg_image, (idx, pos_idx, neg_idx)
 
 class Prefetcher(object):
 	""" Prefetcher returns a preloaded batch and starts copying next batch to GPU. """

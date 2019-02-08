@@ -8,6 +8,7 @@ TRAIN_FILE: "train_1.csv"
 # 2 for Pair, 3 for Triplet
 DATASET_N: 3
 EXCLUDE_WHALE: True
+INCLUDE_BOXES: True
 IMAGE_SIZE: 224
 TRANSFORMS: "CPad|RandomCrop"
 PAIR_SPLIT_P: 0.5
