@@ -189,7 +189,7 @@ def save_model(model, config, snap_fname):
 	else:
 		torch.save(model.model.state_dict(), os.path.join(config.RUN_DIR, snap_fname))
 
-def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup=None):
+def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup=None, scheduler=None):
 	batch_time = AverageMeter()
 	data_time = AverageMeter()
 	losses = AverageMeter()
@@ -227,6 +227,8 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 		inputs = prefetcher.next_batch()
 	
 	pbar.close()
+	if scheduler is not None:
+		scheduler.step()
 
 	logger.info("TRAIN Epoch: %d Loss: %.2f Batch Time: %.2fs Data Time: %.2fs" % (epoch+1, losses.avg, batch_time.avg, data_time.avg))
 
@@ -392,7 +394,7 @@ def main(args):
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="Training CLI")
 	parser.add_argument("config_file", metavar="FILEPATH", type=str, help="Config file.")
-	parser.add_argument("--mixup", action="store_false", help="Flag whether to prevent mixup.")
+	parser.add_argument("--mixup", action="store_true", help="Flag whether to prevent mixup.")
 	parser.add_argument("-cv", "--cross_validate", action="store_true", help="Flag whether to use cross validation.")
 	parser.add_argument("--no_snaps", action="store_true", help="Flag whether to prevent from storing snapshots.")
 	parser.add_argument("-nw", "--num_workers", metavar="INT", type=int, default=6, help="Number of processes (workers).")
