@@ -23,7 +23,7 @@ from siamese import SiameseWrapper, TripletWrapper, similarity_matrix
 from loss import ContrastiveLoss, TripletLoss, MarginLoss
 from schedulers import Scheduler
 from mixup import Mixup
-from metrics import AverageMeter, topk_accuracy, topk_accuracy_preds
+from metrics import AverageMeter, topk_accuracy, topk_accuracy_preds, unique
 
 def load_config(path):
 	with open(path, "r") as f:
@@ -291,7 +291,7 @@ def eval_loop(epoch, loaders, model, criterion, config, logger):
 	pbar.close()
 
 	train_predictions = predictions[:len(loaders["train"])].view(-1, config.OUT_DIM)[:num_images]
-	test_predictions = predictions[:len(loaders["test"])].view(-1, config.OUT_DIM)[:num_test_images]
+	test_predictions = predictions[len(loaders["train"]):].view(-1, config.OUT_DIM)[:num_test_images]
 	predictions = torch.zeros(total_images, config.OUT_DIM).cuda()
 	predictions[:num_images].add_(train_predictions)
 	predictions[num_images:].add_(test_predictions)
@@ -300,25 +300,36 @@ def eval_loop(epoch, loaders, model, criterion, config, logger):
 	test_labels = test_labels.view(-1)[:num_test_images]
 	distance_matrix = similarity_matrix(predictions)
 	train_distance_matrix = distance_matrix[:num_images,:num_images]
-	values, indices = train_distance_matrix.topk(6, 1, largest=False)
+	values, indices = train_distance_matrix.topk(7, 1, largest=False)
 	# First column is the identity (diagonal on similarity matrix) -> remove
 	values = values[:,1:]
 	indices = indices[:,1:]
 	pred_targets = train_labels[indices]
+	unique_preds = unique(pred_targets)
 	# If any of the 5 smallest distances is greater than the criterion margin, replace prediction with new whale
-	pred_targets[:,-1].mul_((values.max(1)[0] < criterion.margin).long())
-	accuracies = topk_accuracy_preds(pred_targets, train_labels, topk=(1,3,5))
+	#substitute_new_whale = (values[:,-1] < criterion.margin).long()
+	#if not config.EXCLUDE_WHALE:
+	#	substitute_new_whale.add_((pred_targets.min(1)[0] == 0).long())
+	#	substitute_new_whale = substitute_new_whale.clamp(0,1)
+	unique_preds[:,-1].mul_((pred_targets.min(1)[0] == 0).long())
+	#breakpoint()
+	accuracies = topk_accuracy_preds(unique_preds, train_labels, topk=(1,3,5))
 	logger.info("TRAIN EVAL Epoch: %d Batch Time: %.2fs Top-1: %.2f Top-3 %.2f Top-5 %.2f" % ((epoch+1, batch_time.avg) + tuple(accuracies)))
 
 	# test_distance_matrix -> num_test_images x num_images
 	test_distance_matrix = distance_matrix[num_images:,:num_images]
 	
-	values, indices = test_distance_matrix.topk(5, 1, largest=False)
+	values, indices = test_distance_matrix.topk(6, 1, largest=False)
 	pred_targets = train_labels[indices]
+	unique_preds = unique(pred_targets)
 	# If any of the 5 smallest distances is greater than the criterion margin, replace prediction with new whale
-	pred_targets[:,-1].mul_((values.max(1)[0] < criterion.margin).long())
-	accuracies = topk_accuracy_preds(pred_targets, test_labels, topk=(1,3,5))
-
+	#substitute_new_whale = (values[:,-1] < criterion.margin).long()
+	#if not config.EXCLUDE_WHALE:
+	#	substitute_new_whale.add_((pred_targets.min(1)[0] == 0).long())
+	#	substitute_new_whale = substitute_new_whale.clamp(0,1)
+	unique_preds[:,-1].mul_((pred_targets.min(1)[0] == 0).long())
+	#breakpoint()
+	accuracies = topk_accuracy_preds(unique_preds, test_labels, topk=(1,3,5))
 	logger.info("TEST EVAL Epoch: %d Batch Time: %.2fs Top-1: %.2f Top-3 %.2f Top-5 %.2f" % ((epoch+1, batch_time.avg) + tuple(accuracies)))
 
 def single_run(dataset, model, config, logger, run_num=0):

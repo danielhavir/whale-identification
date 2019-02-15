@@ -1,3 +1,5 @@
+import torch
+
 class AverageMeter(object):
     """
         Computes and stores the average and current value
@@ -18,6 +20,17 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
+def unique(preds, num=5):
+    dset_size = preds.size(0)
+    res = torch.zeros(dset_size, num).cuda().long().sub_(1)
+    for i in range(dset_size):
+        u = preds[i].unique(sorted=False)
+        if u.size(0) > num:
+            res[i,:u.size(0)].mul_(0).add_(preds[i, :num])
+        else:
+            res[i,:u.size(0)].mul_(0).add_(u)
+    return res
+
 def topk_accuracy(output, target, topk=(1,)):
     """Computes the precision@k for the specified values of k"""
     maxk = max(topk)
@@ -30,7 +43,7 @@ def topk_accuracy(output, target, topk=(1,)):
     res = []
     for k in topk:
         correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
-        res.append(correct_k.mul_(100.0 / batch_size))
+        res.append(correct_k.mul_(100.0 / dset_size).item())
     return res
 
 def topk_accuracy_preds(pred, target, topk=(1,)):
