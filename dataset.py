@@ -94,9 +94,10 @@ def triple_collate(batch):
 class Dataset(torch.utils.data.Dataset):
 	""" Wrapper for image data to store in memory """
 	def __init__(self, csv_filename="train_1.csv", num_workers=10, test_size=0.1, seed=42, filter_new_whale=True,
-	transform=None, include_boxes=True, print_fn=print):
+	transform=None, box_transform=None, include_boxes=True, print_fn=print):
 		self.df = pd.read_csv(os.path.join(os.environ["data"], "humpback-whale-identification", csv_filename))
 		self.transform = transform
+		self.box_transform = box_transform
 		self.filter_new_whale = filter_new_whale
 		if filter_new_whale:
 			self.df = self.df[self.df.Id!="new_whale"].reset_index(drop=True)
@@ -142,13 +143,14 @@ class Dataset(torch.utils.data.Dataset):
 		if self.include_boxes:
 			box = self.boxes.loc[self.df.Image[idx]].values.copy()
 
-		if self.transform is not None:
+		if self.box_transform is not None and self.include_boxes:
 			if self.include_boxes:
 				s = self.transform({"image": image, "bb": box})
 				image = s["image"]
 				box = s["bb"]
-			else:
-				image = self.transform(image)
+
+		if self.transform is not None:
+			image = self.transform(image)
 		
 		if self.include_boxes:
 			return image, self.df.Label[idx], box, idx

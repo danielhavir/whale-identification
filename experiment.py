@@ -15,7 +15,7 @@ import torch.utils.data as thd
 import torchvision.transforms as transforms
 from tqdm import tqdm
 
-from dataset import Dataset, PairExtension, TripletExtension, fast_collate, pair_collate, triple_collate, Prefetcher, TripletPrefetcher
+import dataset as d
 import ctransforms
 from resnet import resnet18, resnet34, resnet50, resnet101, resnet152
 from densenet import densenet121, densenet169, densenet201, densenet161
@@ -67,32 +67,33 @@ def set_seed(seed):
 	torch.manual_seed(seed)
 
 def get_transforms(config):
-	transform = []
-	if not config.INCLUDE_BOXES:
-		transform.append(transforms.ToPILImage())
+	transform = [transforms.ToPILImage()]
+	boxtransform = []
 	for t in config.TRANSFORMS.split("|"):
 		if t == "CPad":
 			transform.append(ctransforms.ConditionalPad(config.IMAGE_SIZE))
+		elif t == "Resize":
+			transform.append(transforms.Resize(config.IMAGE_SIZE+1))
+		elif t == "RandomCrop":
+			transform.append(transforms.RandomCrop(config.IMAGE_SIZE))
+		elif t == "Gray":
+			transform.append(torchvision.transforms.Grayscale(num_output_channels=3))
+	for t in config.BOXTRANSFORMS.split("|"):
 		elif t == "Square":
 			transform.append(ctransforms.Square(config.IMAGE_SIZE))
 		elif t == "Resize":
-			if config.INCLUDE_BOXES:
-				transform.append(ctransforms.Resize(config.IMAGE_SIZE+1))
-			else:
-				transform.append(transforms.Resize(config.IMAGE_SIZE+1))
+			transform.append(ctransforms.Resize(config.IMAGE_SIZE+1))
 		elif t == "RandomCrop":
-			if config.INCLUDE_BOXES:
-				transform.append(ctransforms.RandomCrop(config.IMAGE_SIZE))
-			else:
-				transform.append(transforms.RandomCrop(config.IMAGE_SIZE))
-	return transforms.Compose(transform)
+			transform.append(ctransforms.RandomCrop(config.IMAGE_SIZE))
+	return (transforms.Compose(boxtransform), transforms.Compose(transform))
 
 def get_dataset(config, logger):
 	logger.info(f"Loading dataset with images of size {config.IMAGE_SIZE}")
 	
 	t0 = time.time()
-	dataset = Dataset(csv_filename=config.TRAIN_FILE, num_workers=config.NW, test_size=config.TEST_SIZE,
-	seed=config.SEED, filter_new_whale=config.EXCLUDE_WHALE, transform=get_transforms(config))
+	box_transform, transform = get_transforms(config)
+	dataset = d.Dataset(csv_filename=config.TRAIN_FILE, num_workers=config.NW, test_size=config.TEST_SIZE,
+	seed=config.SEED, filter_new_whale=config.EXCLUDE_WHALE, transform=transform, box_transform=box_transform)
 	logger.info("Dataset loaded at %.2fs" % (time.time() - t0))
 
 	return dataset
@@ -103,18 +104,26 @@ def get_loaders(dataset, config, logger, n=1):
 		train_indices = dataset.get_train_indices(p=config.PAIR_SPLIT_P)
 		logger.info("Indices created at %.2fs" % (time.time() - t0))
 		loaders = {
-			"train": thd.DataLoader(PairExtension(dataset), batch_size=config.BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=pair_collate, num_workers=config.NW),
+			"train": thd.DataLoader(d.PairExtension(dataset), batch_size=config.BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=d.pair_collate, num_workers=config.NW),
 		}
 	elif n == 3:
 		train_indices, test_indices = dataset.get_train_test_split()
+		if dataset.transform is None:
+			collate_fn = d.triple_collate
+		else:
+			collate_fn = d.triple_collate_pil
 		loaders = {
-			"train": thd.DataLoader(TripletExtension(dataset), batch_size=config.BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=triple_collate, num_workers=config.NW),
+			"train": thd.DataLoader(d.TripletExtension(dataset), batch_size=config.BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=collate_fn, num_workers=config.NW),
 		}
 	else:
 		train_indices, test_indices = dataset.get_train_test_split()
+		if dataset.transform is None:
+			collate_fn = d.fast_collate
+		else:
+			collate_fn = d.fast_collate_pil
 		loaders = {
-			"train": thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=fast_collate, num_workers=config.NW),
-			"test": thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(test_indices), collate_fn=fast_collate, num_workers=config.NW)
+			"train": thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(train_indices), collate_fn=collate_fn, num_workers=config.NW),
+			"test": thd.DataLoader(dataset, batch_size=config.EVAL_BATCH_SIZE, sampler=thd.SubsetRandomSampler(test_indices), collate_fn=collate_fn, num_workers=config.NW)
 		}
 	return loaders
 
@@ -198,7 +207,7 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 	end = time.time()
 	#scheduler = Scheduler(optimizer, len(loader), config.LR)
 	pbar = tqdm(desc=f"TRAIN Epoch {epoch+1}", total=len(loader))
-	prefetcher = TripletPrefetcher(loader)
+	prefetcher = d.TripletPrefetcher(loader)
 
 	inputs = prefetcher.next_batch()
 	i = -1
@@ -239,7 +248,7 @@ def eval_loop(epoch, loaders, model, criterion, config, logger):
 	num_test_images = loaders["test"].sampler.indices.size(0)
 	model.eval()
 	pbar = tqdm(desc=f"TRAIN EVAL Epoch {epoch+1}", total=len(loaders["train"]))
-	prefetcher = Prefetcher(loaders["train"])
+	prefetcher = d.Prefetcher(loaders["train"])
 	with torch.no_grad():
 		batch_i = -1
 		inputs, targets = prefetcher.next_batch()
@@ -267,7 +276,7 @@ def eval_loop(epoch, loaders, model, criterion, config, logger):
 	
 		pbar.close()
 		pbar = tqdm(desc=f"TEST EVAL Epoch {epoch+1}", total=len(loaders["test"]))
-		prefetcher = Prefetcher(loaders["test"])
+		prefetcher = d.Prefetcher(loaders["test"])
 		inputs, targets = prefetcher.next_batch()
 
 		end = time.time()
@@ -338,6 +347,7 @@ def single_run(dataset, model, config, logger, run_num=0):
 	start = time.time()
 	criterion = load_criterion(config, logger)
 	optimizer = load_optimizer(model, config, logger)
+	scheduler = optim.lr_scheduler.StepLR(optimizer, 10, gamma=0.1)
 
 	if config.MIXUP:
 		logger.info(f"Using mixup with alpha={config.ALPHA}")
@@ -349,7 +359,7 @@ def single_run(dataset, model, config, logger, run_num=0):
 	train_loader = get_loaders(dataset, config, logger, n=config.DATASET_N)["train"]
 	for epoch in range(config.EPOCHS):
 
-		train_loop(epoch, train_loader, model, criterion, optimizer, config, logger, mixup=mixup)
+		train_loop(epoch, train_loader, model, criterion, optimizer, config, logger, mixup=mixup, scheduler=scheduler)
 
 		if (epoch+1) % config.EVAL_INTERVAL == 0:
 			eval_loop(epoch, loaders, model, criterion, config, logger)
