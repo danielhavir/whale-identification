@@ -77,14 +77,18 @@ def get_transforms(config):
 		elif t == "RandomCrop":
 			transform.append(transforms.RandomCrop(config.IMAGE_SIZE))
 		elif t == "Gray":
-			transform.append(torchvision.transforms.Grayscale(num_output_channels=3))
+			transform.append(transforms.Grayscale(num_output_channels=3))
+		elif t == "Pad":
+			transform.append(transforms.Pad(20, padding_mode="edge"))
+		elif t == "Rotate":
+			transform.append(transforms.RandomRotation(10))
 	for t in config.BOXTRANSFORMS.split("|"):
-		elif t == "Square":
-			transform.append(ctransforms.Square(config.IMAGE_SIZE))
+		if t == "Square":
+			boxtransform.append(ctransforms.Square(config.IMAGE_SIZE))
 		elif t == "Resize":
-			transform.append(ctransforms.Resize(config.IMAGE_SIZE+1))
+			boxtransform.append(ctransforms.Resize(config.IMAGE_SIZE+1))
 		elif t == "RandomCrop":
-			transform.append(ctransforms.RandomCrop(config.IMAGE_SIZE))
+			boxtransform.append(ctransforms.RandomCrop(config.IMAGE_SIZE))
 	return (transforms.Compose(boxtransform), transforms.Compose(transform))
 
 def get_dataset(config, logger):

@@ -66,7 +66,7 @@ class TripletHead(nn.Module):
         x3 = (input1.sub(input2)).abs()
         x4 = x3.pow(2)
 
-        inputs = torch.stack([x1, x2, x3x x4], dim=0).unsqueeze(-1)
+        inputs = torch.stack([x1, x2, x3, x4], dim=0).unsqueeze(-1)
         inputs = self.relu(self.conv1(inputs)).view(x1.size(0), x1.size(1), 32, 1)
         inputs = self.conv2(inputs).view(x1.size(0), -1)
         inputs = self.sum(inputs)

@@ -144,10 +144,9 @@ class Dataset(torch.utils.data.Dataset):
 			box = self.boxes.loc[self.df.Image[idx]].values.copy()
 
 		if self.box_transform is not None and self.include_boxes:
-			if self.include_boxes:
-				s = self.transform({"image": image, "bb": box})
-				image = s["image"]
-				box = s["bb"]
+			s = self.box_transform({"image": image, "bb": box})
+			image = s["image"]
+			box = s["bb"]
 
 		if self.transform is not None:
 			image = self.transform(image)
