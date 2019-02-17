@@ -145,7 +145,11 @@ def load_model(config, logger):
 	}
 
 	start = time.time()
-	classifier = lambda num_features: nn.Linear(num_features, config.OUT_DIM)
+	classifier = lambda num_features: nn.Sequential(
+		nn.Linear(num_features, 128),
+		nn.ReLU(inplace=True),
+		nn.Linear(128, config.OUT_DIM)
+	)
 	logger.info(f"Loading {config.MODEL}")
 	if config.MODEL.startswith("densenet"):
 		model = pretrained_models[config.MODEL](pretrained=True)
@@ -169,6 +173,7 @@ def load_model(config, logger):
 		model = nn.DataParallel(model)
 	model = model.cuda()
 
+	print(model)
 	logger.info("Model loaded at %.2fs" % (time.time() - start))
 	return model
 

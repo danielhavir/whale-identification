@@ -87,5 +87,5 @@ def similarity_matrix(mat):
     r = torch.mm(mat, mat.t())
     diag = r.diag().unsqueeze(0)
     diag = diag.expand_as(r)
-    D = diag + diag.t() - 2*r
+    D = diag + diag.t() - r.mul_(2)
     return D.sqrt()
