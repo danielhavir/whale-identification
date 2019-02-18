@@ -31,18 +31,22 @@ class TripletWrapper(nn.Module):
         return anchor, positive, negative
 
 class TripletHead(nn.Module):
-    def __init__(self, model, distance_fn=None):
+    def __init__(self, model):
         super(TripletHead, self).__init__()
         self.model = model
+        self.model.avgpool = torch.nn.AdaptiveAvgPool2d(1)
         #for layer in [self.model.layer1, self.model.layer2, self.model.layer3, self.model.layer4]:
         for param in self.model.parameters():
             param.requires_grad = False
         
         self.max_pool = nn.MaxPool2d(2, 2)
-        self.conv1 = nn.Conv2d(self.model.fc.in_features, 32, (4,1))
+        self.conv1 = nn.Conv2d(1, 32, (4,1))
         self.relu = nn.ReLU(inplace=True)
-        self.conv1 = nn.Conv2d(32, 1, (1,32))
+        self.conv2 = nn.Conv2d(1, 1, (1,32))
         self.sum = nn.Linear(512, 1)
+        
+        # Remove the linear layer, to save memory
+        self.model.fc = None
 
     def features(self, x):
         x = self.model.conv1(x)
@@ -62,12 +66,12 @@ class TripletHead(nn.Module):
     
     def head(self, input1, input2):
         x1 = input1.mul(input2)
-        x2 = input2.add(input2)
+        x2 = input1.add(input2)
         x3 = (input1.sub(input2)).abs()
         x4 = x3.pow(2)
 
-        inputs = torch.stack([x1, x2, x3, x4], dim=0).unsqueeze(-1)
-        inputs = self.relu(self.conv1(inputs)).view(x1.size(0), x1.size(1), 32, 1)
+        inputs = torch.stack([x1, x2, x3, x4], dim=1).unsqueeze(1)
+        inputs = self.relu(self.conv1(inputs)).view(x1.size(0), 1, x1.size(1), 32)
         inputs = self.conv2(inputs).view(x1.size(0), -1)
         inputs = self.sum(inputs)
 

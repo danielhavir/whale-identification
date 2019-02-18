@@ -19,7 +19,7 @@ import dataset as d
 import ctransforms
 from resnet import resnet18, resnet34, resnet50, resnet101, resnet152
 from densenet import densenet121, densenet169, densenet201, densenet161
-from siamese import SiameseWrapper, TripletWrapper, similarity_matrix
+from siamese import SiameseWrapper, TripletWrapper, similarity_matrix, TripletHead
 from loss import ContrastiveLoss, TripletLoss, MarginLoss
 from schedulers import Scheduler
 from mixup import Mixup
@@ -145,35 +145,37 @@ def load_model(config, logger):
 	}
 
 	start = time.time()
-	classifier = lambda num_features: nn.Sequential(
-		nn.Linear(num_features, 128),
-		nn.ReLU(inplace=True),
-		nn.Linear(128, config.OUT_DIM)
-	)
 	logger.info(f"Loading {config.MODEL}")
-	if config.MODEL.startswith("densenet"):
-		model = pretrained_models[config.MODEL](pretrained=True)
-		num_ftrs = model.classifier.in_features
-		model.classifier = classifier(num_ftrs)
-	elif config.MODEL.startswith("resnet"):
-		model = pretrained_models[config.MODEL](pretrained=True)
-		num_ftrs = model.fc.in_features
-		model.avgpool = torch.nn.AdaptiveAvgPool2d(1)
-		model.fc = classifier(num_ftrs)
-	
-	if config.DATASET_N == 2:
-		model = SiameseWrapper(model, distance_fn=F.pairwise_distance)
-	elif config.DATASET_N == 3:
-		model = TripletWrapper(model)
+	if config.MODEL.startswith("head"):
+		model = TripletHead(pretrained_models[config.MODEL[5:]](pretrained=True))
 	else:
-		raise ValueError(f"Received unknown dataset n: {config.DATASET_N}")
+		classifier = lambda num_features: nn.Sequential(
+			nn.Linear(num_features, 128),
+			nn.ReLU(inplace=True),
+			nn.Linear(128, config.OUT_DIM)
+		)
+		if config.MODEL.startswith("densenet"):
+			model = pretrained_models[config.MODEL](pretrained=True)
+			num_ftrs = model.classifier.in_features
+			model.classifier = classifier(num_ftrs)
+		elif config.MODEL.startswith("resnet"):
+			model = pretrained_models[config.MODEL](pretrained=True)
+			num_ftrs = model.fc.in_features
+			model.avgpool = torch.nn.AdaptiveAvgPool2d(1)
+			model.fc = classifier(num_ftrs)
+		
+		if config.DATASET_N == 2:
+			model = SiameseWrapper(model, distance_fn=F.pairwise_distance)
+		elif config.DATASET_N == 3:
+			model = TripletWrapper(model)
+		else:
+			raise ValueError(f"Received unknown dataset n: {config.DATASET_N}")
 	
 	if config.MULTI_GPU:
 		logger.info("Using multiple GPUs")
 		model = nn.DataParallel(model)
 	model = model.cuda()
 
-	print(model)
 	logger.info("Model loaded at %.2fs" % (time.time() - start))
 	return model
 
@@ -185,6 +187,8 @@ def load_criterion(config, logger):
 		criterion = TripletLoss(margin=config.MARGIN)
 	elif config.LOSS == "margin":
 		criterion = MarginLoss(loss_lambda=config.LOSS_LAMBDA)
+	elif config.LOSS == "bce":
+		criterion = nn.BCEWithLogitsLoss()
 	else:
 		raise ValueError(f"Received unknown loss function: {config.LOSS}")
 
@@ -211,6 +215,7 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 	batch_time = AverageMeter()
 	data_time = AverageMeter()
 	losses = AverageMeter()
+	acc = AverageMeter()
 
 	model.train()
 	end = time.time()
@@ -219,27 +224,36 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 	prefetcher = d.TripletPrefetcher(loader)
 
 	inputs = prefetcher.next_batch()
+	ones = torch.ones(inputs.size(0)).cuda()
+	zeros = torch.zeros(inputs.size(0)).cuda()
 	i = -1
 	while inputs is not None:
 		i += 1
+		batch_size = inputs.size(0)
 
 		#scheduler.adjust_lr(epoch, i)
 		data_time.update(time.time() - end)
 
 		if mixup is not None:
 			inputs = mixup(inputs)
-		anchor, positive, negative = model(inputs)
-		loss = criterion(anchor, positive, negative)
+		
+		positive, negative = model(inputs)
+		
+		pos_loss = criterion(positive.view(-1), ones[:batch_size])
+		neg_loss = criterion(negative.view(-1), zeros[:batch_size])
+		loss = pos_loss + neg_loss
 
 		optimizer.zero_grad()
 		loss.backward()
 		optimizer.step()
 
-		losses.update(loss.item())
+		losses.update(loss.item(), n=batch_size)
+		acc.update(((torch.sigmoid(positive.view(-1))>0.5)==ones[:batch_size].byte()).float().mean().item(), n=batch_size)
+		acc.update(((torch.sigmoid(negative.view(-1))>0.5)==zeros[:batch_size].byte()).float().mean().item(), n=batch_size)
 
 		torch.cuda.synchronize()
 		batch_time.update(time.time() - end)
-		pbar.set_postfix(loss=losses.avg)
+		pbar.set_postfix(loss=losses.avg, acc=acc.avg)
 		pbar.update(1)
 		end = time.time()
 		inputs = prefetcher.next_batch()
@@ -248,7 +262,7 @@ def train_loop(epoch, loader, model, criterion, optimizer, config, logger, mixup
 	if scheduler is not None:
 		scheduler.step()
 
-	logger.info("TRAIN Epoch: %d Loss: %.2f Batch Time: %.2fs Data Time: %.2fs" % (epoch+1, losses.avg, batch_time.avg, data_time.avg))
+	logger.info("TRAIN Epoch: %d Loss: %.2f Acc: %.2f Batch Time: %.2fs Data Time: %.2fs" % (epoch+1, losses.avg, acc.avg, batch_time.avg, data_time.avg))
 
 def eval_loop(epoch, loaders, model, criterion, config, logger):
 	batch_time = AverageMeter()
@@ -268,7 +282,7 @@ def eval_loop(epoch, loaders, model, criterion, config, logger):
 		predictions = torch.zeros(len(loaders["train"])+len(loaders["test"]), config.EVAL_BATCH_SIZE, config.OUT_DIM).cuda()
 		while inputs is not None:
 			batch_i += 1
-			preds = model.model(inputs)
+			preds = model.features(inputs)
 			if preds.size(0) < config.EVAL_BATCH_SIZE:
 				predictions[batch_i][:preds.size(0)].add_(preds)
 				train_labels[batch_i][:targets.size(0)].add_(targets.long())
@@ -294,7 +308,7 @@ def eval_loop(epoch, loaders, model, criterion, config, logger):
 		while inputs is not None:
 			batch_i += 1
 			test_i += 1
-			preds = model.model(inputs)
+			preds = model.features(inputs)
 			if preds.size(0) < config.EVAL_BATCH_SIZE:
 				predictions[batch_i][:preds.size(0)].add_(preds)
 				test_labels[test_i][:targets.size(0)].add_(targets.long())
@@ -315,42 +329,40 @@ def eval_loop(epoch, loaders, model, criterion, config, logger):
 	predictions = torch.zeros(total_images, config.OUT_DIM).cuda()
 	predictions[:num_images].add_(train_predictions)
 	predictions[num_images:].add_(test_predictions)
+	del inputs, targets, train_predictions, test_predictions, prefetcher
+	torch.cuda.empty_cache()
 
 	train_labels = train_labels.view(-1)[:num_images]
 	test_labels = test_labels.view(-1)[:num_test_images]
-	distance_matrix = similarity_matrix(predictions)
-	train_distance_matrix = distance_matrix[:num_images,:num_images]
-	values, indices = train_distance_matrix.topk(7, 1, largest=False)
-	# First column is the identity (diagonal on similarity matrix) -> remove
-	values = values[:,1:]
-	indices = indices[:,1:]
-	pred_targets = train_labels[indices]
-	unique_preds = unique(pred_targets)
-	# If any of the 5 smallest distances is greater than the criterion margin, replace prediction with new whale
-	#substitute_new_whale = (values[:,-1] < criterion.margin).long()
-	#if not config.EXCLUDE_WHALE:
-	#	substitute_new_whale.add_((pred_targets.min(1)[0] == 0).long())
-	#	substitute_new_whale = substitute_new_whale.clamp(0,1)
-	unique_preds[:,-1].mul_((pred_targets.min(1)[0] == 0).long())
 	#breakpoint()
-	accuracies = topk_accuracy_preds(unique_preds, train_labels, topk=(1,3,5))
-	logger.info("TRAIN EVAL Epoch: %d Batch Time: %.2fs Top-1: %.2f Top-3 %.2f Top-5 %.2f" % ((epoch+1, batch_time.avg) + tuple(accuracies)))
-
-	# test_distance_matrix -> num_test_images x num_images
-	test_distance_matrix = distance_matrix[num_images:,:num_images]
+	head_batch_size = 256*config.EVAL_BATCH_SIZE
+	loader = thd.DataLoader(thd.TensorDataset(predictions[:num_images]), batch_size=head_batch_size, shuffle=False)
+	matrix = torch.zeros(total_images, num_images).cuda()
+	with torch.no_grad():
+		for i, p in enumerate(tqdm(predictions, desc=f"HEAD EVAL", total=total_images)):
+			p = p.expand(num_images, predictions.size(1))
+			if i < num_images-1:
+				i += 1
+				#breakpoint()
+				try:
+					tmp = torch.sigmoid(model.head(p[i:], predictions[i:num_images])).view(-1)
+				except:
+					print(i)
+					breakpoint()
+				matrix[i,i:].add_(tmp)
+			elif i >= num_images:
+				tmp = torch.sigmoid(model.head(p, predictions[:num_images])).view(-1)
+				matrix[i].add_(tmp)
 	
-	values, indices = test_distance_matrix.topk(6, 1, largest=False)
+	matrix[:num_images,:] = matrix[:num_images,:].add(matrix[:num_images,:].t())
+	values, indices = matrix.topk(6, 1, largest=True)
 	pred_targets = train_labels[indices]
 	unique_preds = unique(pred_targets)
-	# If any of the 5 smallest distances is greater than the criterion margin, replace prediction with new whale
-	#substitute_new_whale = (values[:,-1] < criterion.margin).long()
-	#if not config.EXCLUDE_WHALE:
-	#	substitute_new_whale.add_((pred_targets.min(1)[0] == 0).long())
-	#	substitute_new_whale = substitute_new_whale.clamp(0,1)
 	unique_preds[:,-1].mul_((pred_targets.min(1)[0] == 0).long())
-	#breakpoint()
-	accuracies = topk_accuracy_preds(unique_preds, test_labels, topk=(1,3,5))
-	logger.info("TEST EVAL Epoch: %d Batch Time: %.2fs Top-1: %.2f Top-3 %.2f Top-5 %.2f" % ((epoch+1, batch_time.avg) + tuple(accuracies)))
+	accuracies = topk_accuracy_preds(unique_preds[:num_images], train_labels, topk=(1,3,5))
+	logger.info("TRAIN EVAL Epoch: %d Top-1: %.2f Top-3 %.2f Top-5 %.2f" % ((epoch+1,) + tuple(accuracies)))
+	accuracies = topk_accuracy_preds(unique_preds[num_images:], test_labels, topk=(1,3,5))
+	logger.info("TEST EVAL Epoch: %d Top-1: %.2f Top-3 %.2f Top-5 %.2f" % ((epoch+1,) + tuple(accuracies)))
 
 def single_run(dataset, model, config, logger, run_num=0):
 	start = time.time()
