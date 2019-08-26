@@ -379,6 +379,7 @@ def single_run(dataset, model, config, logger, run_num=0):
 	
 	end = time.time() - start
 	logger.info("Run %d finished at %dmin %.2fs" % (run_num, end // 60, end % 60))
+	save_model(model.cpu(), config, "model.last")
 
 def cross_validate(dataset, model, config, logger):
 	kfold = KFold(n_splits=5, random_state=config.SEED)
